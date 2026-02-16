@@ -1,54 +1,72 @@
 package com.himanshu.boardgamebuddy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
-import com.github.tomakehurst.wiremock.client.WireMock;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.evaluation.FactCheckingEvaluator;
+import org.springframework.ai.chat.evaluation.RelevancyEvaluator;
+import org.springframework.ai.evaluation.EvaluationRequest;
+import org.springframework.ai.evaluation.EvaluationResponse;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.wiremock.spring.ConfigureWireMock;
-import org.wiremock.spring.EnableWireMock;
-import org.springframework.core.io.Resource;
 
-import java.io.IOException;
-import java.nio.charset.Charset;
-
-@EnableWireMock(
-        @ConfigureWireMock(baseUrlProperties = "openai.base.url")
-)
-@SpringBootTest(
-        properties = "spring.ai.openai.base-url=${openai.base.url}"
-)
+@SpringBootTest
 class BoardGameBuddyApplicationTests {
 
-    // inject test response
-    @Value("classpath:/test-openai-response.json")
-    Resource responseResource;
+    @Autowired
+    private BoardGameService boardGameService;
 
     @Autowired
-    ChatClient.Builder chatClientBuilder;
+    private ChatClient.Builder chatClientBuilder;
+
+    private RelevancyEvaluator relevancyEvaluator;
+
+    private FactCheckingEvaluator factCheckingEvaluator;
 
     @BeforeEach
-    public void setup() throws IOException {
-       var cannedResponse =
-               responseResource.getContentAsString(Charset.defaultCharset());
-       var mapper = new ObjectMapper();
-       var responseNode = mapper.readTree(cannedResponse);
-        WireMock.stubFor(WireMock.post("/v1/chat/completions")
-                .willReturn(ResponseDefinitionBuilder.okForJson(responseNode)));
+    public void setUp() {
+        this.relevancyEvaluator = new RelevancyEvaluator(chatClientBuilder);
+        this.factCheckingEvaluator = FactCheckingEvaluator.builder(chatClientBuilder).build();
     }
 
     @Test
-    public void testAskQuestion() {
-        var boardGameService = new SpringAiBoardGameService(chatClientBuilder);
-        var answer = boardGameService.askQuestion(
-                new Question("What is the capital of France?")
-        );
-        Assertions.assertThat(answer).isNotNull();
-        Assertions.assertThat(answer.answer()).isEqualTo("Paris");
+    public void evaluateRelevancy() {
+        String userText = "Why is the sky blue?";
+        Question question = new Question(userText);
+        Answer answer = boardGameService.askQuestion(question);
+
+        EvaluationRequest evaluationRequest = new EvaluationRequest(userText, answer.answer());
+        EvaluationResponse evaluationResponse = relevancyEvaluator.evaluate(evaluationRequest);
+
+        Assertions.assertThat(evaluationResponse.isPass())
+                .withFailMessage("""
+                        ========================================
+                        The answer "%s"
+                        is not considered relevant to the question
+                        "%s".
+                        ========================================
+                        """, answer.answer(), userText)
+                .isTrue();
+    }
+
+    @Test
+    public void evaluateFactChecking() {
+        var userText = "Why is the sky blue?";
+        var question = new Question(userText);
+        var answer = boardGameService.askQuestion(question);
+
+        var evaluationRequest = new EvaluationRequest(userText, answer.answer());
+        var evaluationResponse = factCheckingEvaluator.evaluate(evaluationRequest);
+
+        Assertions.assertThat(evaluationResponse.isPass())
+                .withFailMessage("""
+                        ========================================
+                        The answer "%s"
+                        is not considered correct for the question
+                        "%s".
+                        ========================================
+                        """)
+                .isTrue();
     }
 }
